@@ -32,7 +32,6 @@ hydra-submitit-launcher==1.2.0
 igraph==0.11.8
 imath==0.0.2
 isoduration==20.11.0
-Js2Py==0.74
 jsonlines==4.0.0
 jsonpickle==3.0.4
 jsonpointer==2.4
