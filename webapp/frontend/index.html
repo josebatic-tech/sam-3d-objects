@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sam3d Web UI</title>
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 20px; }
+      .preview { max-width: 400px; }
+    </style>
+  </head>
+  <body>
+    <h1>sam3d — Inference UI</h1>
+    <p>Upload an RGBA image (alpha can contain mask) or an image plus a binary mask file.</p>
+    <form id="form">
+      <div>
+        <label>Image (RGBA recommended):</label>
+        <input type="file" id="image" accept="image/*" required />
+      </div>
+      <div>
+        <label>Mask (optional):</label>
+        <input type="file" id="mask" accept="image/*" />
+      </div>
+      <div>
+        <label>Seed (optional):</label>
+        <input type="number" id="seed" />
+      </div>
+      <div style="margin-top:10px">
+        <button type="submit">Run Inference</button>
+      </div>
+    </form>
+
+    <h3>Preview</h3>
+    <img id="preview" class="preview" src="" alt="preview" />
+
+    <h3>Result</h3>
+    <div id="result"></div>
+
+    <h3>3D Viewer</h3>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+      <button id="orbitBtn">Vista órbita</button>
+      <button id="securityBtn">Vista cámara de seguridad</button>
+      <span style="color:#666;font-size:12px">(La vista de seguridad fija la cámara y desactiva rotación)</span>
+    </div>
+    <div id="viewer" style="width:600px;height:400px;border:1px solid #ccc"></div>
+
+    <script>
+      const form = document.getElementById('form');
+      const imageInput = document.getElementById('image');
+      const maskInput = document.getElementById('mask');
+      const preview = document.getElementById('preview');
+      const result = document.getElementById('result');
+
+      imageInput.addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        const url = URL.createObjectURL(f);
+        preview.src = url;
+      });
+
+      form.addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        result.innerText = 'Running inference... (this may take a while)';
+        const fd = new FormData();
+        fd.append('image', imageInput.files[0]);
+        if (maskInput.files.length > 0) fd.append('mask', maskInput.files[0]);
+        const seed = document.getElementById('seed').value;
+        if (seed) fd.append('seed', seed);
+
+        try {
+          const res = await fetch('/infer', { method: 'POST', body: fd });
+          const j = await res.json();
+          if (!res.ok) {
+            result.innerText = 'Error: ' + (j.error || JSON.stringify(j));
+            return;
+          }
+          if (j.ply_url) {
+            const url = j.ply_url;
+            result.innerHTML = `<p>PLY producido: <a href="${url}" target="_blank">Descargar</a></p>`;
+            try { loadPLY(url); } catch(e) { console.warn('viewer error', e); }
+          } else {
+            result.innerText = 'Inference finished. No PLY produced.';
+          }
+        } catch (e) {
+          result.innerText = 'Request failed: ' + e;
+        }
+      });
+    </script>
+    <!-- three.js CDN and PLYLoader -->
+    <script type="module">
+      import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js';
+      import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/controls/OrbitControls.js';
+      import { PLYLoader } from 'https://cdn.jsdelivr.net/npm/three@0.158.0/examples/jsm/loaders/PLYLoader.js';
+
+      const container = document.getElementById('viewer');
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(60, container.clientWidth / container.clientHeight, 0.01, 1000);
+      camera.position.set(0, 0, 2);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.update();
+
+      // UI buttons to switch views
+      const orbitBtn = document.getElementById('orbitBtn');
+      const securityBtn = document.getElementById('securityBtn');
+
+      function setSecurityView(){
+        // position like a mounted security camera: high, angled down, fixed
+        camera.position.set(0.0, 3.0, 2.5);
+        camera.fov = 35;
+        camera.updateProjectionMatrix();
+        camera.lookAt(0, 0, 0);
+        controls.enabled = false;
+        controls.autoRotate = false;
+        controls.enablePan = false;
+        controls.enableRotate = false;
+        controls.enableZoom = true;
+      }
+
+      function setOrbitView(){
+        camera.position.set(0, 0, 2);
+        camera.fov = 60;
+        camera.updateProjectionMatrix();
+        controls.enabled = true;
+        controls.enablePan = true;
+        controls.enableRotate = true;
+        controls.enableZoom = true;
+        controls.update();
+      }
+
+      orbitBtn.addEventListener('click', (e)=>{ setOrbitView(); });
+      securityBtn.addEventListener('click', (e)=>{ setSecurityView(); });
+
+      const light = new THREE.DirectionalLight(0xffffff, 1);
+      light.position.set(1, 1, 1);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0x888888));
+
+      let currentMesh = null;
+
+      window.loadPLY = async function(url){
+        // remove previous
+        if (currentMesh) { scene.remove(currentMesh); currentMesh.geometry.dispose(); currentMesh.material.dispose(); currentMesh = null; }
+        const loader = new PLYLoader();
+        // fetch as arraybuffer to ensure CORS works with same origin
+        const res = await fetch(url);
+        if (!res.ok) throw new Error('Failed to fetch PLY');
+        const ab = await res.arrayBuffer();
+        const geometry = loader.parse(ab);
+        geometry.computeVertexNormals();
+        const material = new THREE.MeshStandardMaterial({ color: 0xaaaaaa, flatShading: false, vertexColors: geometry.hasAttribute('color') });
+        const mesh = new THREE.Mesh(geometry, material);
+        // center and scale
+        geometry.computeBoundingBox();
+        const bb = geometry.boundingBox;
+        const size = new THREE.Vector3(); bb.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const scale = 1.0 / maxDim;
+        mesh.scale.setScalar(scale);
+        geometry.computeBoundingBox();
+        geometry.computeBoundingSphere();
+        scene.add(mesh);
+        currentMesh = mesh;
+      };
+
+      function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
+      animate();
+    </script>
+  </body>
+</html>
